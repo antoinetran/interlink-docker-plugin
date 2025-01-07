@@ -25,17 +25,19 @@ type PodStatus struct {
 
 // RetrievedContainer is used in InterLink to rearrange data structure in a suitable way for the sidecar
 type RetrievedContainer struct {
-	Name       string         `json:"name"`
-	ConfigMaps []v1.ConfigMap `json:"configMaps"`
-	Secrets    []v1.Secret    `json:"secrets"`
-	EmptyDirs  []string       `json:"emptyDirs"`
+	Name                string         `json:"name"`
+	ConfigMaps          []v1.ConfigMap `json:"configMaps"`
+	Secrets             []v1.Secret    `json:"secrets"`
+	EmptyDirs           []string       `json:"emptyDirs"`
+	ProjectedVolumeMaps []v1.ConfigMap `json:"projectedvolumemaps"`
 }
 
 // RetrievedPoData is used in InterLink to rearrange data structure in a suitable way for the sidecar
 type RetrievedPodData struct {
-	Pod            v1.Pod               `json:"pod"`
-	Containers     []RetrievedContainer `json:"container"`
-	InitContainers []RetrievedContainer `json:"initContainer"`
+	Pod                 v1.Pod               `json:"pod"`
+	Containers          []RetrievedContainer `json:"container"`
+	InitContainers      []RetrievedContainer `json:"initContainer"`
+	ProjectedVolumeMaps []v1.ConfigMap       `json:"projectedvolumemaps"`
 }
 
 // InterLinkConfig holds the whole configuration

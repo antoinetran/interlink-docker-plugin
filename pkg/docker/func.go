@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,12 +141,79 @@ func prepareMounts(Ctx context.Context, config commonIL.InterLinkConfig, data co
 				}
 			}
 		}
+
+		for _, projectedMap := range cont.ProjectedVolumeMaps {
+			if containerName == podNamespace+"-"+podUID+"-"+cont.Name {
+				paths, err := mountData(Ctx, config, data.Pod, projectedMap, container)
+				if err != nil {
+					return "", errors.New("Error mounting ProjectedVolumeMap " + projectedMap.Name)
+				}
+				for _, path := range paths {
+					mountedData += "-v " + path + " "
+				}
+			}
+		}
+
 	}
 
 	if last := len(mountedData) - 1; last >= 0 && mountedData[last] == ',' {
 		mountedData = mountedData[:last]
 	}
 	return mountedData, nil
+}
+
+func mountDataSimpleVolume(
+	Ctx context.Context, config commonIL.InterLinkConfig, pod v1.Pod, container v1.Container,
+	wd string, volumeType string, vol v1.Volume, mode os.FileMode, mountData map[string][]byte) ([]string, error) {
+
+	var dockerVolumesPaths []string
+
+	volumePath := config.DataRootFolder + pod.Namespace + "-" + string(pod.UID) + "/" + volumeType + "/" + vol.Name
+	err := os.RemoveAll(volumePath)
+
+	if err != nil {
+		return nil, err
+	}
+
+	podVolumeDir := filepath.Join(wd + "/" + volumePath)
+
+	correctMountPath := ""
+	for _, volumeMount := range container.VolumeMounts {
+		if volumeMount.Name == vol.Name {
+			correctMountPath = volumeMount.MountPath
+		}
+	}
+
+	if mountData != nil {
+		for key := range mountData {
+			path := filepath.Join(podVolumeDir, key)
+			path += (":" + correctMountPath + "/" + key + " ")
+			dockerVolumesPaths = append(dockerVolumesPaths, path)
+		}
+	}
+
+	cmd := []string{"-p " + podVolumeDir}
+	shell := exec2.ExecTask{
+		Command: "mkdir",
+		Args:    cmd,
+		Shell:   true,
+	}
+
+	execReturn, _ := shell.Execute()
+	if execReturn.Stderr != "" {
+		return nil, err
+	}
+
+	for k, v := range mountData {
+		// TODO: Ensure that these files are deleted in failure cases
+		fullPath := filepath.Join(podVolumeDir, k)
+		os.WriteFile(fullPath, v, mode)
+		if err != nil {
+			err = os.RemoveAll(fullPath)
+			return nil, err
+		}
+	}
+	return dockerVolumesPaths, nil
 }
 
 func mountData(Ctx context.Context, config commonIL.InterLinkConfig, pod v1.Pod, data interface{}, container v1.Container) ([]string, error) {
@@ -165,102 +233,27 @@ func mountData(Ctx context.Context, config commonIL.InterLinkConfig, pod v1.Pod,
 			}
 
 			switch mount := data.(type) {
+			// Projected volumes are considered ConfigMap for simplicity.
 			case v1.ConfigMap:
-				var configMapNamePaths []string
-				err := os.RemoveAll(config.DataRootFolder + pod.Namespace + "-" + string(pod.UID) + "/" + "configMaps/" + vol.Name)
-
-				if err != nil {
-					return nil, err
+				volumeType := "configMaps"
+				if podVolumeSpec == nil || podVolumeSpec.ConfigMap == nil {
+					return nil, fmt.Errorf("Missing ConfigMap field in ", podVolumeSpec)
 				}
-
-				if podVolumeSpec != nil && podVolumeSpec.ConfigMap != nil {
-					podConfigMapDir := filepath.Join(wd+"/"+config.DataRootFolder+pod.Namespace+"-"+string(pod.UID)+"/", "configMaps/", vol.Name)
-					mode := os.FileMode(*podVolumeSpec.ConfigMap.DefaultMode)
-
-					correctMountPath := ""
-					for _, volumeMount := range container.VolumeMounts {
-						if volumeMount.Name == vol.Name {
-							correctMountPath = volumeMount.MountPath
-						}
-					}
-
-					if mount.Data != nil {
-						for key := range mount.Data {
-							path := filepath.Join(podConfigMapDir, key)
-							path += (":" + correctMountPath + "/" + key + " ")
-							configMapNamePaths = append(configMapNamePaths, path)
-						}
-					}
-
-					cmd := []string{"-p " + podConfigMapDir}
-					shell := exec2.ExecTask{
-						Command: "mkdir",
-						Args:    cmd,
-						Shell:   true,
-					}
-
-					execReturn, _ := shell.Execute()
-					if execReturn.Stderr != "" {
-						return nil, err
-					}
-
-					for k, v := range mount.Data {
-						// TODO: Ensure that these files are deleted in failure cases
-						fullPath := filepath.Join(podConfigMapDir, k)
-						os.WriteFile(fullPath, []byte(v), mode)
-						if err != nil {
-							err = os.RemoveAll(fullPath)
-							return nil, err
-						}
-					}
-					return configMapNamePaths, nil
+				mode := os.FileMode(*podVolumeSpec.ConfigMap.DefaultMode)
+				// Convert map of string to map of []byte
+				mountData := make(map[string][]byte)
+				for k, v := range mount.Data {
+					mountData[k] = []byte(v)
 				}
+				return mountDataSimpleVolume(Ctx, config, pod, container, wd, volumeType, vol, mode, mountData)
 
 			case v1.Secret:
-				var secretNamePaths []string
-				err := os.RemoveAll(config.DataRootFolder + pod.Namespace + "-" + string(pod.UID) + "/" + "secrets/" + vol.Name)
-
-				if err != nil {
-					return nil, err
+				volumeType := "secrets"
+				if podVolumeSpec == nil || podVolumeSpec.Secret == nil {
+					return nil, fmt.Errorf("Missing Secret field in ", podVolumeSpec)
 				}
-				if podVolumeSpec != nil && podVolumeSpec.Secret != nil {
-					mode := os.FileMode(*podVolumeSpec.Secret.DefaultMode)
-					podSecretDir := filepath.Join(wd+"/"+config.DataRootFolder+pod.Namespace+"-"+string(pod.UID)+"/", "secrets/", vol.Name)
-
-					if mount.Data != nil {
-						for key := range mount.Data {
-							path := filepath.Join(podSecretDir, key)
-							path += (":" + mountSpec.MountPath + "/" + key + " ")
-							secretNamePaths = append(secretNamePaths, path)
-						}
-					}
-
-					cmd := []string{"-p " + podSecretDir}
-					shell := exec2.ExecTask{
-						Command: "mkdir",
-						Args:    cmd,
-						Shell:   true,
-					}
-
-					execReturn, _ := shell.Execute()
-					if strings.Compare(execReturn.Stdout, "") != 0 {
-						return nil, err
-					}
-					if execReturn.Stderr != "" {
-						return nil, errors.New(execReturn.Stderr)
-					}
-
-					for k, v := range mount.Data {
-						// TODO: Ensure that these files are deleted in failure cases
-						fullPath := filepath.Join(podSecretDir, k)
-						os.WriteFile(fullPath, v, mode)
-						if err != nil {
-							err = os.RemoveAll(fullPath)
-							return nil, err
-						}
-					}
-					return secretNamePaths, nil
-				}
+				mode := os.FileMode(*podVolumeSpec.Secret.DefaultMode)
+				return mountDataSimpleVolume(Ctx, config, pod, container, wd, volumeType, vol, mode, mount.Data)
 
 			case string:
 				if podVolumeSpec != nil && podVolumeSpec.EmptyDir != nil {
